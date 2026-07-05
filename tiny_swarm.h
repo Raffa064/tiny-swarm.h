@@ -1,6 +1,7 @@
-#ifndef TINY_SWARM_H
-#define TINY_SWARM_H
+#ifndef TINYSWARM_H
+#define TINYSWARM_H
 
+#include <stdlib.h>
 #include <stdint.h>
 #include <sched.h>
 #include <stddef.h>
@@ -9,12 +10,22 @@
 #include <string.h>
 #include <stdatomic.h>
 
-#define SWARM_KERNEL(ctx_t, item_t, name) \
-   void __sw_kernel_##name(ctx_t *ctx, int index, item_t *item); \
-   void name(void *ctx, int index, void *item) {  __sw_kernel_##name(ctx, index, item);  } \
-   void __sw_kernel_##name(ctx_t *ctx, int index, item_t *item)
+#ifndef TINYSWARM_DEFAULT_WORKERS_COUNT
+#define TINYSWARM_DEFAULT_WORKERS_COUNT 2
+#endif
 
-typedef void (*kernel_fn)(void *ctx, int index, void *item);;
+#define TINYSWARM_OK   0
+#define TINYSWARM_FAIL 1
+
+// This macro is just a convenience for defining swarm kernels.
+// All kernels exposes 3 parameters:
+// Context, index and the current item pointer.
+#define TINYSWARM_KERNEL(ctx_t, item_t, name) \
+   void __sw_kernel_##name(ctx_t *ctx, size_t index, item_t *item); \
+   void name(void *ctx, size_t index, void *item) {  __sw_kernel_##name(ctx, index, item);  } \
+   void __sw_kernel_##name(ctx_t *ctx, size_t index, item_t *item)
+
+typedef void (*SwarmKernel)(void *ctx, size_t index, void *item);;
 
 typedef struct {
   void *ctx;
@@ -29,17 +40,20 @@ typedef struct {
   uint8_t *data;
   size_t stride, count, chunk_size;
   _Atomic size_t index;
-} Workload;
+} SwarmWorkload;
 
 typedef struct {
   pthread_t tid;
-  Workload *load;
-  kernel_fn kernel;
+  SwarmWorkload *load;
+  SwarmKernel kernel;
 } SwarmWorker;
 
-void swarm_spawn(Swarm s, kernel_fn kernel);
+// Initializes a swarm of works in parallel, process data array and return when finished.
+// If it returns 1, somthing went wrong with given configuration, or it couldn't spawn 
+// any threads for some reason
+int swarm_spawn(Swarm s, SwarmKernel kernel);
 
-#ifdef TINY_SWARM_IMPLEMENTATION 
+#ifdef TINYSWARM_IMPLEMENTATION 
 
 void *swarm_worker_routine(void *args) {
   SwarmWorker *worker = (SwarmWorker*) args;
@@ -63,26 +77,45 @@ void *swarm_worker_routine(void *args) {
   return NULL;
 }
 
-void swarm_spawn(Swarm s, kernel_fn kernel) {
-  SwarmWorker workers[s.workers_count];
+int swarm_spawn(Swarm swarm, SwarmKernel kernel) {
+  if (swarm.stride == 0)
+    return TINYSWARM_FAIL;
 
-  Workload load = {
-    .ctx = s.ctx,
-    .data = s.data,
-    .stride = s.stride,
-    .count = s.count,
-    .chunk_size = s.chunk_size? s.chunk_size : 1,
+  if (swarm.count == 0) 
+    return TINYSWARM_OK; // Nothing to do...
+
+
+  size_t worker_count = swarm.workers_count;
+  if (worker_count == 0)
+    worker_count = TINYSWARM_DEFAULT_WORKERS_COUNT;
+
+  SwarmWorker workers[worker_count];
+  SwarmWorkload load = {
+    .ctx = swarm.ctx,
+    .data = swarm.data,
+    .stride = swarm.stride,
+    .count = swarm.count,
+    .chunk_size = swarm.chunk_size? swarm.chunk_size : 1,
     .index = 0,
   };
 
-  for (size_t i = 0; i < s.workers_count; i++) {
+  size_t spawned_threads = 0;
+  for (size_t i = 0; i < worker_count; i++) {
     workers[i].load = &load;
     workers[i].kernel = kernel;
-    pthread_create(&workers[i].tid, NULL, swarm_worker_routine, &workers[i]);
+    if (pthread_create(&workers[i].tid, NULL, swarm_worker_routine, &workers[i]) != 0)
+      break;
+
+    spawned_threads++;
   }
 
-  for (size_t i = 0; i < s.workers_count; i++)
+  if (spawned_threads == 0)
+    return TINYSWARM_FAIL;
+
+  for (size_t i = 0; i < spawned_threads; i++)
     pthread_join(workers[i].tid, NULL);
+
+  return TINYSWARM_OK;
 }
 
 #endif

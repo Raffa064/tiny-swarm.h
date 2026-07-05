@@ -1,18 +1,18 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define TINY_SWARM_IMPLEMENTATION
+#define TINYSWARM_IMPLEMENTATION
 #include "tiny_swarm.h"
 
 #define N 100000000L
 
-SWARM_KERNEL(void, int, kernel_1) {
+TINYSWARM_KERNEL(void, int, kernel_1) {
   *item = index * 2 + 1;
 }
 
-SWARM_KERNEL(void, int, kernel_2) {
+TINYSWARM_KERNEL(void, int, kernel_2) {
   if (*item != index * 2 + 1) {
-    fprintf(stderr, "Failed at %d\n", index);
+    fprintf(stderr, "Failed at %zu\n", index);
     exit(1);
   }
 }
@@ -26,7 +26,6 @@ int main() {
   }
 
   Swarm s = {
-    .ctx = numbers,
     .workers_count = 4,
     .data = (void*) numbers,
     .stride = sizeof(int),

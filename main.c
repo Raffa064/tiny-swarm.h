@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 #define TINYSWARM_IMPLEMENTATION
-#include "tiny_swarm.h"
+#include "tiny-swarm.h"
 
 #define N 100000000L
 

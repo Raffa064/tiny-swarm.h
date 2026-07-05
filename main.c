@@ -1,25 +1,23 @@
 #include <stdlib.h>
+#include <stdio.h>
+
 #define TINY_SWARM_IMPLEMENTATION
 #include "tiny_swarm.h"
 
-#include <stdio.h>
+#define N 100000000L
 
-typedef struct {
-  int coef;
-  int term;
-} Config;
-
-SWARM_KERNEL(void, int, set_id) {
-  *item = index;
+SWARM_KERNEL(void, int, kernel_1) {
+  *item = index * 2 + 1;
 }
 
-SWARM_KERNEL(Config, int, mul2) {
-  *item *= ctx->coef;
-  *item += ctx->term;
+SWARM_KERNEL(void, int, kernel_2) {
+  if (*item != index * 2 + 1) {
+    fprintf(stderr, "Failed at %d\n", index);
+    exit(1);
+  }
 }
 
 int main() {
-  long N = 1000000000L;
   int *numbers = malloc(sizeof(int) * N);
 
   if (!numbers) {
@@ -28,15 +26,16 @@ int main() {
   }
 
   Swarm s = {
-    .ctx = &(Config) { .coef = 2, .term = 1 },
-    .thread_count = 8,
+    .ctx = numbers,
+    .workers_count = 4,
     .data = (void*) numbers,
     .stride = sizeof(int),
     .count = N,
+    .chunk_size = 32
   };
 
-  swarm_spawn(s, set_id);
-  swarm_spawn(s, mul2);
+  swarm_spawn(s, kernel_1);
+  swarm_spawn(s, kernel_2);
 
   printf("%zu Calculations done.\n", N);
 }

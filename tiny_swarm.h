@@ -1,11 +1,13 @@
 #ifndef TINY_SWARM_H
 #define TINY_SWARM_H
 
+#include <stdint.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #define SWARM_KERNEL(ctx_t, item_t, name) \
    void __sw_kernel_##name(ctx_t *ctx, int index, item_t *item); \
@@ -15,78 +17,72 @@
 typedef void (*kernel_fn)(void *ctx, int index, void *item);;
 
 typedef struct {
-  void *ctx; // optional
-  char *data;
+  void *ctx;
+  uint8_t *data;
   size_t stride, count;
-  int thread_count;
+  size_t workers_count;
+  size_t chunk_size; // 0 means each worker process a single item at a time
 } Swarm;
-
-
-void swarm_spawn(Swarm s, kernel_fn kernel);
-
-#ifdef TINY_SWARM_IMPLEMENTATION
 
 typedef struct {
   void *ctx;
-  pthread_t thread;
-  int status;
-  size_t index, count, stride;
-  char* item;
+  uint8_t *data;
+  size_t stride, count, chunk_size;
+  _Atomic size_t index;
+} Workload;
+
+typedef struct {
+  pthread_t tid;
+  Workload *load;
   kernel_fn kernel;
 } SwarmWorker;
 
-void *swarm_spawn_worker(void *_args) {
-  SwarmWorker *args = (SwarmWorker*)_args;
+void swarm_spawn(Swarm s, kernel_fn kernel);
 
-  for (int i = 0; i < args->count; i++) {
-    args->kernel(args->ctx, args->index + i, args->item + args->stride * i);
+#ifdef TINY_SWARM_IMPLEMENTATION 
+
+void *swarm_worker_routine(void *args) {
+  SwarmWorker *worker = (SwarmWorker*) args;
+
+  while (1) {
+    size_t chunk_index = atomic_fetch_add(&worker->load->index, worker->load->chunk_size);
+    if (chunk_index >= worker->load->count) break;
+
+    size_t chunk_size = worker->load->chunk_size;
+    size_t remaining = worker->load->count - chunk_index;
+    if (chunk_size > remaining)
+      chunk_size = remaining;
+    
+    for (size_t i = 0; i < chunk_size; i++) {
+      size_t index = chunk_index + i;
+      void *item = worker->load->data + index * worker->load->stride;
+      worker->kernel(worker->load->ctx, index, item);
+    }
   }
-
-  args->status = 0;
 
   return NULL;
 }
 
-void swarm_spawn(Swarm s, kernel_fn kernel) {  
-  SwarmWorker workers[s.thread_count];
-  memset(workers, 0, sizeof(workers));
-  
-  size_t worker_ptr = 0;
-  size_t item_ptr = 0;
+void swarm_spawn(Swarm s, kernel_fn kernel) {
+  SwarmWorker workers[s.workers_count];
 
-  size_t ratio = s.count / (s.thread_count * 2);
-  if (ratio == 0) ratio = 1;
+  Workload load = {
+    .ctx = s.ctx,
+    .data = s.data,
+    .stride = s.stride,
+    .count = s.count,
+    .chunk_size = s.chunk_size? s.chunk_size : 1,
+    .index = 0,
+  };
 
-  while (item_ptr < s.count) {
-    while (workers[worker_ptr].status != 0) {
-      worker_ptr = (worker_ptr + 1) % s.thread_count; // go to next worker
-      sched_yield();
-    }
-
-    size_t count = item_ptr + ratio > s.count? (s.count - item_ptr) : ratio;
-    workers[worker_ptr] = (SwarmWorker) {
-      .ctx = s.ctx,
-      .status = 1,
-      .index = item_ptr,
-      .count = count,
-      .stride = s.stride,
-      .item = s.data + s.stride * item_ptr,
-      .kernel = kernel,
-    };
-    
-    pthread_create(&workers[worker_ptr].thread, NULL, swarm_spawn_worker, &workers[worker_ptr]);
-    
-    worker_ptr++;
-    item_ptr += count;
+  for (size_t i = 0; i < s.workers_count; i++) {
+    workers[i].load = &load;
+    workers[i].kernel = kernel;
+    pthread_create(&workers[i].tid, NULL, swarm_worker_routine, &workers[i]);
   }
 
-  // Wait for all thread to finish.
-  for (int i = 0; i < s.thread_count; i++) {
-    if (workers[i].status) {
-      i--;
-      sched_yield();
-    }
-  }
+  for (size_t i = 0; i < s.workers_count; i++)
+    pthread_join(workers[i].tid, NULL);
 }
 
 #endif
